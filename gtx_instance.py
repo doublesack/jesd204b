@@ -1,7 +1,8 @@
 #! /usr/bin/python
-from migen import Signal, C, Module, ClockDomain, ClockSignal
+from migen import Signal, Module, ClockDomain, ClockSignal, Instance
 from migen.genlib.resetsync import AsyncResetSynchronizer
 from misoc.interconnect.csr import AutoCSR, CSRStorage
+from misoc.interconnect import csr_bus
 from collections import namedtuple
 import migen.fhdl
 import jesd204b.core as jesdc
@@ -26,17 +27,27 @@ class JESDConfig(Module, AutoCSR):
         self.refclk = Signal()
         self.clock_domains.cd_jesd = ClockDomain()
 
+        self.refclk_pads = lvdsPair(Signal(name="refclk_p"),
+                                    Signal(name="refclk_n"))
+
         refclk2 = Signal()
         self.specials += [
+            Instance("IBUFDS_GTE3", i_CEB=self.ibuf_disable.storage, p_REFCLK_HROW_CK_SEL=0b00,
+                     i_I=self.refclk_pads.p, i_IB=self.refclk_pads.n,
+                     o_O=self.refclk, o_ODIV2=refclk2),
             AsyncResetSynchronizer(self.cd_jesd, self.jreset.storage),
         ]
+        self.specials += Instance("BUFG_GT", i_I=refclk2, o_O=self.cd_jesd.clk)
 
 
-class MainMod(Module):
+class MainMod(Module, AutoCSR):
 
     nLanes = 1
+    def_csr_data_width = 8
+    def_csr_addr_width = 8
 
-    def __init__(self):
+    def __init__(self, csr_data_width=def_csr_data_width,
+                 csr_addr_width=def_csr_addr_width):
         ps = jesd204b.common.JESD204BPhysicalSettings(l=self.nLanes, m=1, n=16, np=16)
         ts = jesd204b.common.JESD204BTransportSettings(f=2, s=2, k=16, cs=0)
         jesd_settings = jesd204b.common.JESD204BSettings(ps, ts, did=0x5a,
@@ -54,16 +65,21 @@ class MainMod(Module):
         self.dac_sync = Signal()
         self.jref = self.crg.jref
 
+        self.csr_devices = [
+            "crg",
+            "control"
+        ]
+
         phys = []
 
         for i in range(self.nLanes):
-            self.jesd_pads_txn.append(Signal(name="jesd_txn"))
             self.jesd_pads_txp.append(Signal(name="jesd_txp"))
+            self.jesd_pads_txn.append(Signal(name="jesd_txn"))
             gtxq = jesdphy.gtx.GTXQuadPLL(refclk, refclk_freq, linerate)
             self.submodules += gtxq
             phy = jesdphy.JESD204BPhyTX(gtxq,
-                                        phyPad(self.jesd_pads_txn[i],
-                                               self.jesd_pads_txp[i]),
+                                        phyPad(self.jesd_pads_txp[i],
+                                               self.jesd_pads_txn[i]),
                                         sys_clk_freq)
             phys.append(phy)
 
@@ -74,13 +90,33 @@ class MainMod(Module):
         self.core.register_jsync(self.dac_sync)
         self.core.register_jref(self.jref)
 
+        self.csr_master = csr_bus.Interface(
+            data_width=csr_data_width, address_width=csr_addr_width)
+        self.submodules.csrbankarray = csr_bus.CSRBankArray(
+            self, self.map_csr_dev, data_width=csr_data_width,
+            address_width=csr_addr_width)
+        self.submodules.csrcon = csr_bus.Interconnect(
+            self.csr_master, self.csrbankarray.get_buses())
+
+    def map_csr_dev(self, name, memory):
+        if memory is not None:
+            name = name + "_" + memory.name_override
+        try:
+            return self.csr_devices.index(name)
+        except ValueError:
+            return None
+
 
 main_mod = MainMod()
-ios = {main_mod.jesd_pads_txn[i] for i in range(main_mod.nLanes)}
-ios = {main_mod.jesd_pads_txp[i] for i in range(main_mod.nLanes)} | ios
+ios = {main_mod.jesd_pads_txp[i] for i in range(main_mod.nLanes)}
+ios = {main_mod.jesd_pads_txn[i] for i in range(main_mod.nLanes)} | ios
 ios.add(main_mod.dac_sync)
 ios.add(main_mod.jref)
 ios = ios.union(main_mod.core.sink.flatten())
+ios = ios | {main_mod.crg.refclk_pads.p,
+             main_mod.crg.refclk_pads.n}
+# ios = ios.union(main_mod.csrbankarray.get_buses().flatten())
+ios = ios.union(main_mod.csr_master.flatten())
 
 migen.fhdl.verilog.convert(main_mod, ios=ios,
                            special_overrides=common.xilinx_special_overrides
