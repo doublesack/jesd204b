@@ -17,8 +17,8 @@ lvdsPair = namedtuple("lvdsPair", "p n")
 
 class JESDConfig(Module, AutoCSR):
     linerate = int(10e9)
-    refclk_freq = int(125e6)
-    fabric_freq = int(125e6)
+    refclk_freq = int(250e6) # Ref Clk of transceiver
+    fabric_freq = int(125e6) # System Clk unrelated to any transceiver business
 
     def __init__(self, use_rtio_clock=False):
         self.ibuf_disable = CSRStorage(reset=1)
@@ -32,24 +32,24 @@ class JESDConfig(Module, AutoCSR):
 
         refclk2 = Signal()
         self.specials += [
-            Instance("IBUFDS_GTE3", i_CEB=self.ibuf_disable.storage, p_REFCLK_HROW_CK_SEL=0b00,
+            Instance("IBUFDS_GTE2", i_CEB=self.ibuf_disable.storage,
                      i_I=self.refclk_pads.p, i_IB=self.refclk_pads.n,
                      o_O=self.refclk, o_ODIV2=refclk2),
             AsyncResetSynchronizer(self.cd_jesd, self.jreset.storage),
         ]
-        self.specials += Instance("BUFG_GT", i_I=refclk2, o_O=self.cd_jesd.clk)
+        self.specials += Instance("BUFG", i_I=refclk2, o_O=self.cd_jesd.clk)
 
 
 class MainMod(Module, AutoCSR):
 
-    nLanes = 1
+    nLanes = 2
     def_csr_data_width = 8
-    def_csr_addr_width = 8
+    def_csr_addr_width = 10
 
     def __init__(self, csr_data_width=def_csr_data_width,
                  csr_addr_width=def_csr_addr_width):
         ps = jesd204b.common.JESD204BPhysicalSettings(l=self.nLanes, m=1, n=16, np=16)
-        ts = jesd204b.common.JESD204BTransportSettings(f=2, s=2, k=16, cs=0)
+        ts = jesd204b.common.JESD204BTransportSettings(f=2, s=1, k=16, cs=0)
         jesd_settings = jesd204b.common.JESD204BSettings(ps, ts, did=0x5a,
                                                          bid=0x5)
 
@@ -80,7 +80,7 @@ class MainMod(Module, AutoCSR):
             phy = jesdphy.JESD204BPhyTX(gtxq,
                                         phyPad(self.jesd_pads_txp[i],
                                                self.jesd_pads_txn[i]),
-                                        sys_clk_freq)
+                                        sys_clk_freq, transceiver="gtx")
             phys.append(phy)
 
         self.submodules.core = jesdc.JESD204BCoreTX(phys, jesd_settings,

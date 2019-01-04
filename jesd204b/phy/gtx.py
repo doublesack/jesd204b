@@ -208,10 +208,16 @@ class GTXTransmitter(Module, AutoCSR):
 
         txoutclk = Signal()
         txdata = Signal(40)
+
+        if use_cpll or pll.config["linerate"] < 6.6e9:
+            PMA_RSV = 0x00018480
+        else:
+            PMA_RSV = 0x001e7080
+
         self.specials += \
             Instance("GTXE2_CHANNEL",
                 # PMA Attributes
-                p_PMA_RSV=0x00018480,
+                p_PMA_RSV=PMA_RSV,
                 p_PMA_RSV2=0x2050,
                 p_PMA_RSV3=0,
                 p_PMA_RSV4=0,

@@ -57,7 +57,11 @@ class JESD204BCoreTX(Module):
         self.comb += link_reset.eq(~reduce(and_, [phy.transmitter.init.done for phy in phys]))
         for n, (phy, lane) in enumerate(zip(phys, transport.source.flatten())):
             phy_name = "phy{}".format(n)
-            phy_cd = phy_name + "_tx"
+            
+            if jesd_settings.nlanes == 1:
+                phy_cd = "tx"
+            else:
+                phy_cd = phy_name + "_tx"
 
             # claim the phy
             setattr(self.submodules, phy_name, phy)
@@ -161,5 +165,3 @@ class JESD204BCoreTXControl(Module, AutoCSR):
                 )
             )
         self.comb += self.restart_count.status.eq(restart_count)
-
-
