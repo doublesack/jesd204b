@@ -32,7 +32,21 @@ class JESD204BCoreTX(Module):
         # restart when disabled or on re-synchronization request
         jsync = Signal()
         self.specials += MultiReg(self.jsync, jsync, "sys")
-        self.comb += self.restart.eq(~self.enable | (self.ready & ~jsync))
+
+        jsync_low_ctr = Signal(4)
+        jsync_low_ctr_r = Signal(4)
+        self.sync += \
+            If(jsync,
+                jsync_low_ctr.eq(0xf)
+            ).Elif(jsync_low_ctr > 0,
+                jsync_low_ctr.eq(jsync_low_ctr - 1)
+            )
+
+        self.sync += jsync_low_ctr_r.eq(jsync_low_ctr)
+
+        self.comb += self.restart.eq(
+            ~self.enable | (self.ready & (jsync_low_ctr == 0)
+                            & (jsync_low_ctr_r == 1)))
 
         # transport layer
         transport = JESD204BTransportTX(jesd_settings, converter_data_width)
@@ -57,7 +71,7 @@ class JESD204BCoreTX(Module):
         self.comb += link_reset.eq(~reduce(and_, [phy.transmitter.init.done for phy in phys]))
         for n, (phy, lane) in enumerate(zip(phys, transport.source.flatten())):
             phy_name = "phy{}".format(n)
-            
+
             if jesd_settings.nlanes == 1:
                 phy_cd = "tx"
             else:

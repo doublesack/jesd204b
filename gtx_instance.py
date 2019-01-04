@@ -17,10 +17,10 @@ lvdsPair = namedtuple("lvdsPair", "p n")
 
 class JESDConfig(Module, AutoCSR):
     linerate = int(10e9)
-    refclk_freq = int(250e6) # Ref Clk of transceiver
-    fabric_freq = int(125e6) # System Clk unrelated to any transceiver business
+    refclk_freq = int(250e6)  # Ref Clk of transceiver has to be linerate/40
+    fabric_freq = int(125e6)  # System Clk unrelated to any transceiver business
 
-    def __init__(self, use_rtio_clock=False):
+    def __init__(self, use_ext_clock=False):
         self.ibuf_disable = CSRStorage(reset=1)
         self.jreset = CSRStorage(reset=1)
         self.jref = Signal()
@@ -30,37 +30,44 @@ class JESDConfig(Module, AutoCSR):
         self.refclk_pads = lvdsPair(Signal(name="refclk_p"),
                                     Signal(name="refclk_n"))
 
-        refclk2 = Signal()
+        refclk2 = Signal()  # Useless for gtx transceivers
         self.specials += [
             Instance("IBUFDS_GTE2", i_CEB=self.ibuf_disable.storage,
                      i_I=self.refclk_pads.p, i_IB=self.refclk_pads.n,
                      o_O=self.refclk, o_ODIV2=refclk2),
             AsyncResetSynchronizer(self.cd_jesd, self.jreset.storage),
         ]
-        self.specials += Instance("BUFG", i_I=refclk2, o_O=self.cd_jesd.clk)
+        if use_ext_clock:
+            self.comb += self.cd_jesd.clk.eq(ClockSignal("ext"))
+        else:
+            self.specials += Instance("BUFG", i_I=self.refclk,
+                                      o_O=self.cd_jesd.clk)
 
 
 class MainMod(Module, AutoCSR):
 
-    nLanes = 2
+    nLanes = 8
     def_csr_data_width = 8
     def_csr_addr_width = 10
 
-    def __init__(self, csr_data_width=def_csr_data_width,
+    def __init__(self, use_ext_clock=False, csr_data_width=def_csr_data_width,
                  csr_addr_width=def_csr_addr_width):
-        ps = jesd204b.common.JESD204BPhysicalSettings(l=self.nLanes, m=1, n=16, np=16)
+        ps = jesd204b.common.JESD204BPhysicalSettings(l=self.nLanes, m=4, n=16, np=16)
         ts = jesd204b.common.JESD204BTransportSettings(f=2, s=1, k=16, cs=0)
         jesd_settings = jesd204b.common.JESD204BSettings(ps, ts, did=0x5a,
                                                          bid=0x5)
 
-        self.submodules.crg = JESDConfig()
+        self.submodules.crg = JESDConfig(use_ext_clock=use_ext_clock)
+        if use_ext_clock:
+            self.clock_domains.cd_ext = ClockDomain()
+
         refclk = self.crg.refclk
         refclk_freq = self.crg.refclk_freq
         linerate = self.crg.linerate
         sys_clk_freq = self.crg.fabric_freq
 
-        self.jesd_pads_txp = []
-        self.jesd_pads_txn = []
+        self.jesd_pads_txp = Signal(self.nLanes, name="jesd_txp")
+        self.jesd_pads_txn = Signal(self.nLanes, name="jesd_txn")
 
         self.dac_sync = Signal()
         self.jref = self.crg.jref
@@ -73,8 +80,6 @@ class MainMod(Module, AutoCSR):
         phys = []
 
         for i in range(self.nLanes):
-            self.jesd_pads_txp.append(Signal(name="jesd_txp"))
-            self.jesd_pads_txn.append(Signal(name="jesd_txn"))
             gtxq = jesdphy.gtx.GTXQuadPLL(refclk, refclk_freq, linerate)
             self.submodules += gtxq
             phy = jesdphy.JESD204BPhyTX(gtxq,
@@ -107,9 +112,10 @@ class MainMod(Module, AutoCSR):
             return None
 
 
-main_mod = MainMod()
-ios = {main_mod.jesd_pads_txp[i] for i in range(main_mod.nLanes)}
-ios = {main_mod.jesd_pads_txn[i] for i in range(main_mod.nLanes)} | ios
+use_ext_clock = False
+
+main_mod = MainMod(use_ext_clock=use_ext_clock)
+ios = {main_mod.jesd_pads_txn, main_mod.jesd_pads_txp}
 ios.add(main_mod.dac_sync)
 ios.add(main_mod.jref)
 ios = ios.union(main_mod.core.sink.flatten())
@@ -117,6 +123,11 @@ ios = ios | {main_mod.crg.refclk_pads.p,
              main_mod.crg.refclk_pads.n}
 # ios = ios.union(main_mod.csrbankarray.get_buses().flatten())
 ios = ios.union(main_mod.csr_master.flatten())
+if use_ext_clock:
+    ios.add(main_mod.cd_ext.clk)
+else:
+    ios.add(main_mod.crg.cd_jesd.clk)
+
 
 migen.fhdl.verilog.convert(main_mod, ios=ios,
                            special_overrides=common.xilinx_special_overrides
